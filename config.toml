@@ -1,0 +1,29 @@
+[audio]
+sample_rate = 16000
+channels = 1
+dtype = "float32"
+max_duration = 300
+min_duration = 0.4
+silence_threshold = -55
+
+[hotkey]
+key = "cmd_r"
+mode = "push_to_talk"
+
+[transcription]
+model = "mlx-community/whisper-large-v3-turbo"
+language = "en"
+temperature = 0.0
+compression_ratio_threshold = 2.4
+no_speech_threshold = 0.6
+
+[cleanup]
+enabled = true
+model = "mlx-community/Qwen3-0.6B-4bit"
+max_tokens = 512
+
+[injection]
+method = "clipboard_paste"
+
+[context]
+enabled = true

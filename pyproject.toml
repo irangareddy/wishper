@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "wishper"
+version = "0.1.0"
+description = "Local voice-to-text with LLM cleanup for macOS, powered by MLX"
+requires-python = ">=3.10"
+dependencies = [
+    "sounddevice",
+    "numpy",
+    "pynput",
+    "pyperclip",
+    "mlx-whisper",
+    "mlx-lm",
+    "tomli",
+    "tomli-w",
+]
+
+[project.scripts]
+wishper = "wishper.main:main"
