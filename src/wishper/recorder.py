@@ -90,6 +90,13 @@ class Recorder:
         audio = np.concatenate(chunks, axis=0)
         return audio.reshape(-1).astype(np.float32, copy=False)
 
+    def get_recent_audio(self, duration_s: float = 0.5) -> np.ndarray:
+        sample_count = max(1, int(duration_s * self.sample_rate))
+        audio = self.get_audio()
+        if audio.size <= sample_count:
+            return audio
+        return audio[-sample_count:]
+
     def is_silent(self) -> bool:
         audio = self.get_audio()
         if audio.size == 0:
