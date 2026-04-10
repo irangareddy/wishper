@@ -40,6 +40,13 @@ DEFAULTS = {
     "context": {
         "enabled": True,
     },
+    "sounds": {
+        "enabled": True,
+    },
+    "vad": {
+        "threshold": 0.5,
+        "min_silence_ms": 700,
+    },
 }
 
 
@@ -51,6 +58,8 @@ class Config:
     cleanup: dict
     injection: dict
     context: dict
+    sounds: dict
+    vad: dict
 
     @classmethod
     def load(cls, path: str = "config.toml") -> "Config":

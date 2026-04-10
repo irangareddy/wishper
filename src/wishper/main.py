@@ -4,16 +4,20 @@ from __future__ import annotations
 
 import argparse
 import threading
+import time
 from pathlib import Path
 
 from pynput.keyboard import Key, Listener
 
 from wishper.cleaner import Cleaner
+from wishper.commands import process_commands
 from wishper.config import Config
 from wishper.context import get_active_app, get_tone
 from wishper.injector import Injector
 from wishper.recorder import Recorder
+from wishper.sounds import SoundPlayer
 from wishper.transcriber import Transcriber
+from wishper.vad import VoiceActivityDetector
 
 
 HOTKEY_MAP = {
@@ -38,36 +42,44 @@ def process_recording(
     transcriber: Transcriber,
     cleaner: Cleaner,
     injector: Injector,
+    sounds: SoundPlayer,
     process_lock: threading.Lock,
 ) -> None:
     """Stop recording and run the text pipeline."""
     with process_lock:
         recorder.stop()
-        if recorder.is_silent():
-            print("[wishper] No speech detected, skipping")
-            return
+        sounds.stop_recording()
+        try:
+            if recorder.is_silent():
+                print("[wishper] No speech detected, skipping")
+                return
 
-        audio = recorder.get_audio()
-        print("[wishper] Transcribing...")
-        raw = transcriber.transcribe(audio)
-        print(f"[wishper] Raw: {raw}")
+            audio = recorder.get_audio()
+            print("[wishper] Transcribing...")
+            raw = transcriber.transcribe(audio)
+            print(f"[wishper] Raw: {raw}")
 
-        if cfg.context["enabled"]:
-            app = get_active_app()
-            tone = get_tone(app)
-            print(f"[wishper] App: {app} -> Tone: {tone}")
-        else:
-            tone = ""
+            if cfg.context["enabled"]:
+                app = get_active_app()
+                tone = get_tone(app)
+                print(f"[wishper] App: {app} -> Tone: {tone}")
+            else:
+                tone = ""
 
-        if cfg.cleanup["enabled"]:
-            print("[wishper] Cleaning...")
-            cleaned = cleaner.clean(raw, app_context=tone)
-            print(f"[wishper] Cleaned: {cleaned}")
-        else:
-            cleaned = raw
+            if cfg.cleanup["enabled"]:
+                print("[wishper] Cleaning...")
+                cleaned = cleaner.clean(raw, app_context=tone)
+                print(f"[wishper] Cleaned: {cleaned}")
+            else:
+                cleaned = raw
 
-        injector.inject(cleaned)
-        print("[wishper] Injected!")
+            cleaned = process_commands(cleaned)
+            injector.inject(cleaned)
+            print("[wishper] Injected!")
+            sounds.done()
+        except Exception:
+            sounds.error()
+            raise
 
 
 def spawn_processing_thread(
@@ -76,6 +88,7 @@ def spawn_processing_thread(
     transcriber: Transcriber,
     cleaner: Cleaner,
     injector: Injector,
+    sounds: SoundPlayer,
     process_lock: threading.Lock,
 ) -> None:
     """Run the processing pipeline without blocking the hotkey listener."""
@@ -88,6 +101,7 @@ def spawn_processing_thread(
                 transcriber=transcriber,
                 cleaner=cleaner,
                 injector=injector,
+                sounds=sounds,
                 process_lock=process_lock,
             )
         except Exception as exc:
@@ -112,6 +126,11 @@ def print_startup_banner(cfg: Config, config_path: str) -> None:
         "[wishper] Hotkey: "
         f"key={cfg.hotkey['key']}, "
         f"mode={cfg.hotkey['mode']}"
+    )
+    print(
+        "[wishper] VAD: "
+        f"threshold={cfg.vad['threshold']}, "
+        f"min_silence_ms={cfg.vad['min_silence_ms']}"
     )
     print(
         "[wishper] Transcription: "
@@ -143,7 +162,7 @@ def main() -> None:
         raise ValueError(f"Unsupported hotkey: {hotkey_name}")
 
     hotkey_mode = cfg.hotkey["mode"]
-    if hotkey_mode not in {"push_to_talk", "toggle"}:
+    if hotkey_mode not in {"push_to_talk", "toggle", "vad_assisted"}:
         raise ValueError(f"Unsupported hotkey mode: {hotkey_mode}")
 
     recorder = Recorder(
@@ -166,20 +185,36 @@ def main() -> None:
         enabled=cfg.cleanup["enabled"],
     )
     injector = Injector(method=cfg.injection["method"])
+    sounds = SoundPlayer(enabled=cfg.sounds["enabled"])
+    vad = None
+    if hotkey_mode == "vad_assisted":
+        vad = VoiceActivityDetector(
+            threshold=cfg.vad["threshold"],
+            min_silence_ms=cfg.vad["min_silence_ms"],
+            sample_rate=cfg.audio["sample_rate"],
+        )
 
     recording_lock = threading.Lock()
     recording_active = False
+    recording_session = 0
     toggle_recording = threading.Event()
     process_lock = threading.Lock()
 
     def start_recording() -> None:
-        nonlocal recording_active
+        nonlocal recording_active, recording_session
         with recording_lock:
             if recording_active:
                 return
+            if vad is not None:
+                vad.reset()
             recorder.start()
+            sounds.start_recording()
             recording_active = True
+            recording_session += 1
+            session_id = recording_session
         print("[wishper] Recording...")
+        if hotkey_mode == "vad_assisted" and vad is not None:
+            threading.Thread(target=monitor_vad, args=(session_id,), daemon=True).start()
 
     def stop_recording_and_process() -> None:
         nonlocal recording_active
@@ -193,14 +228,38 @@ def main() -> None:
             transcriber=transcriber,
             cleaner=cleaner,
             injector=injector,
+            sounds=sounds,
             process_lock=process_lock,
         )
+
+    def monitor_vad(session_id: int) -> None:
+        if vad is None:
+            return
+
+        window_duration_s = max(1.5, (cfg.vad["min_silence_ms"] / 1000.0) + 0.5)
+
+        try:
+            while True:
+                time.sleep(0.5)
+                with recording_lock:
+                    if not recording_active or session_id != recording_session:
+                        return
+
+                audio = recorder.get_recent_audio(duration_s=window_duration_s)
+                if not vad.detect_silence_after_speech(audio):
+                    continue
+
+                print("[wishper] VAD detected silence, stopping recording...")
+                stop_recording_and_process()
+                return
+        except Exception as exc:
+            print(f"[wishper] VAD error: {exc}")
 
     def on_press(key: Key | object) -> None:
         if key != hotkey:
             return
 
-        if hotkey_mode == "push_to_talk":
+        if hotkey_mode in {"push_to_talk", "vad_assisted"}:
             start_recording()
             return
 
@@ -213,7 +272,7 @@ def main() -> None:
         start_recording()
 
     def on_release(key: Key | object) -> None:
-        if key != hotkey or hotkey_mode != "push_to_talk":
+        if key != hotkey or hotkey_mode not in {"push_to_talk", "vad_assisted"}:
             return
         stop_recording_and_process()
 

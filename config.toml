@@ -27,3 +27,10 @@ method = "clipboard_paste"
 
 [context]
 enabled = true
+
+[sounds]
+enabled = true
+
+[vad]
+threshold = 0.5
+min_silence_ms = 700
