@@ -16,6 +16,7 @@ from wishper.context import get_active_app, get_tone
 from wishper.injector import Injector
 from wishper.recorder import Recorder
 from wishper.sounds import SoundPlayer
+from wishper.streaming import StreamingTranscriber
 from wishper.transcriber import Transcriber
 from wishper.vad import VoiceActivityDetector
 
@@ -40,6 +41,7 @@ def process_recording(
     cfg: Config,
     recorder: Recorder,
     transcriber: Transcriber,
+    streaming_state: dict | None,
     cleaner: Cleaner,
     injector: Injector,
     sounds: SoundPlayer,
@@ -56,7 +58,14 @@ def process_recording(
 
             audio = recorder.get_audio()
             print("[wishper] Transcribing...")
-            raw = transcriber.transcribe(audio)
+            raw = ""
+            if streaming_state is not None:
+                thread = streaming_state.get("thread")
+                if thread is not None:
+                    thread.join()
+                raw = streaming_state.get("text", "")
+            if not raw:
+                raw = transcriber.transcribe(audio)
             print(f"[wishper] Raw: {raw}")
 
             if cfg.context["enabled"]:
@@ -66,14 +75,16 @@ def process_recording(
             else:
                 tone = ""
 
+            # Voice commands first (before LLM cleanup mangles command words)
+            cleaned = process_commands(raw)
+            if cleaned != raw:
+                print(f"[wishper] Commands: {cleaned}")
+
             if cfg.cleanup["enabled"]:
                 print("[wishper] Cleaning...")
-                cleaned = cleaner.clean(raw, app_context=tone)
+                cleaned = cleaner.clean(cleaned, app_context=tone)
                 print(f"[wishper] Cleaned: {cleaned}")
-            else:
-                cleaned = raw
 
-            cleaned = process_commands(cleaned)
             injector.inject(cleaned)
             print("[wishper] Injected!")
             sounds.done()
@@ -86,6 +97,7 @@ def spawn_processing_thread(
     cfg: Config,
     recorder: Recorder,
     transcriber: Transcriber,
+    streaming_state: dict | None,
     cleaner: Cleaner,
     injector: Injector,
     sounds: SoundPlayer,
@@ -99,6 +111,7 @@ def spawn_processing_thread(
                 cfg=cfg,
                 recorder=recorder,
                 transcriber=transcriber,
+                streaming_state=streaming_state,
                 cleaner=cleaner,
                 injector=injector,
                 sounds=sounds,
@@ -179,6 +192,22 @@ def main() -> None:
         compression_ratio_threshold=cfg.transcription["compression_ratio_threshold"],
         no_speech_threshold=cfg.transcription["no_speech_threshold"],
     )
+    streaming_enabled = (
+        cfg.transcription.get("streaming", False)
+        and hotkey_mode in {"vad_assisted", "toggle"}
+    )
+    streaming_transcriber = (
+        StreamingTranscriber(
+            model=cfg.transcription["model"],
+            language=cfg.transcription["language"],
+            temperature=cfg.transcription["temperature"],
+            compression_ratio_threshold=cfg.transcription["compression_ratio_threshold"],
+            no_speech_threshold=cfg.transcription["no_speech_threshold"],
+            chunk_duration_s=cfg.transcription["chunk_duration_s"],
+        )
+        if streaming_enabled
+        else None
+    )
     cleaner = Cleaner(
         model=cfg.cleanup["model"],
         max_tokens=cfg.cleanup["max_tokens"],
@@ -199,9 +228,10 @@ def main() -> None:
     recording_session = 0
     toggle_recording = threading.Event()
     process_lock = threading.Lock()
+    streaming_state: dict | None = None
 
     def start_recording() -> None:
-        nonlocal recording_active, recording_session
+        nonlocal recording_active, recording_session, streaming_state
         with recording_lock:
             if recording_active:
                 return
@@ -212,20 +242,46 @@ def main() -> None:
             recording_active = True
             recording_session += 1
             session_id = recording_session
+            if streaming_transcriber is not None:
+                stop_event = threading.Event()
+                streaming_state = {"stop_event": stop_event, "thread": None, "text": ""}
+            else:
+                streaming_state = None
         print("[wishper] Recording...")
+        if streaming_transcriber is not None and streaming_state is not None:
+            current_streaming_state = streaming_state
+
+            def handle_partial(text: str) -> None:
+                current_streaming_state["text"] = text
+                print(f"[wishper] Partial: {text}")
+
+            def stream_runner() -> None:
+                current_streaming_state["text"] = streaming_transcriber.start_streaming(
+                    recorder=recorder,
+                    callback=handle_partial,
+                    stop_event=current_streaming_state["stop_event"],
+                )
+
+            current_streaming_state["thread"] = threading.Thread(target=stream_runner, daemon=True)
+            current_streaming_state["thread"].start()
         if hotkey_mode == "vad_assisted" and vad is not None:
             threading.Thread(target=monitor_vad, args=(session_id,), daemon=True).start()
 
     def stop_recording_and_process() -> None:
-        nonlocal recording_active
+        nonlocal recording_active, streaming_state
         with recording_lock:
             if not recording_active:
                 return
             recording_active = False
+            current_streaming_state = streaming_state
+            if current_streaming_state is not None:
+                current_streaming_state["stop_event"].set()
+            streaming_state = None
         spawn_processing_thread(
             cfg=cfg,
             recorder=recorder,
             transcriber=transcriber,
+            streaming_state=current_streaming_state,
             cleaner=cleaner,
             injector=injector,
             sounds=sounds,

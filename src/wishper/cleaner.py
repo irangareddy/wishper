@@ -33,9 +33,11 @@ class Cleaner:
             "- Remove false starts and repeated words\n"
             "- Fix grammar and punctuation\n"
             '- Remove leading fillers (do NOT start output with "So," or "Like,")\n'
-            "- Keep the original meaning exactly — do not add, remove, or rephrase ideas\n"
+            "- Keep the FULL original meaning — do not summarize, truncate, or shorten\n"
+            "- Keep ALL sentences — do not drop or merge sentences\n"
             "- Output ONLY the cleaned text, nothing else\n"
             "- Do NOT explain, comment, or think out loud\n"
+            "- The output should be roughly the same length as the input\n"
             f'{f"- Tone: {app_context}" if app_context else ""}'
         )
         messages = [
