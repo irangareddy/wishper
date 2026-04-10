@@ -1,5 +1,7 @@
 """LLM post-processing cleanup module."""
 
+import re
+
 from mlx_lm import generate, load
 
 
@@ -24,16 +26,36 @@ class Cleaner:
         if not raw_text:
             return ""
 
-        tone_line = f"Tone: {app_context}\n" if app_context else ""
-        prompt = (
-            f"<|im_start|>system\nYou clean dictated text. "
-            f"Remove filler words (um, uh, like, you know), fix grammar and punctuation. "
-            f"Output ONLY the cleaned text, nothing else. "
-            f"No explanations, no thinking, no commentary. /no_think\n"
-            f"{tone_line}<|im_end|>\n"
-            f"<|im_start|>user\n{raw_text}<|im_end|>\n"
-            f"<|im_start|>assistant\n"
+        system_prompt = (
+            "You are a dictation cleanup assistant. Your ONLY job is to clean raw dictated text.\n\n"
+            "Rules:\n"
+            "- Remove ALL filler words: um, uh, like, you know, so, basically, actually, I mean, kind of, sort of\n"
+            "- Remove false starts and repeated words\n"
+            "- Fix grammar and punctuation\n"
+            '- Remove leading fillers (do NOT start output with "So," or "Like,")\n'
+            "- Keep the original meaning exactly — do not add, remove, or rephrase ideas\n"
+            "- Output ONLY the cleaned text, nothing else\n"
+            "- Do NOT explain, comment, or think out loud\n"
+            f'{f"- Tone: {app_context}" if app_context else ""}'
         )
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": raw_text},
+        ]
+
+        try:
+            prompt = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=False,
+            )
+        except TypeError:
+            prompt = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
 
         try:
             output = generate(
@@ -48,8 +70,12 @@ class Cleaner:
         # Strip chat template artifacts and thinking tags
         for tag in ("<|im_end|>", "<|im_start|>", "<|endoftext|>"):
             output = output.split(tag)[0]
-        # Remove <think>...</think> blocks from Qwen3
-        import re
         output = re.sub(r"<think>.*?</think>", "", output, flags=re.DOTALL)
+        output = re.sub(
+            r"^(So,?\s*|Like,?\s*|Well,?\s*|I mean,?\s*)",
+            "",
+            output,
+            flags=re.IGNORECASE,
+        )
         output = output.strip()
         return output or raw_text
