@@ -28,6 +28,8 @@ DEFAULTS = {
         "temperature": 0.0,
         "compression_ratio_threshold": 2.4,
         "no_speech_threshold": 0.6,
+        "streaming": False,
+        "chunk_duration_s": 3.0,
     },
     "cleanup": {
         "enabled": True,
